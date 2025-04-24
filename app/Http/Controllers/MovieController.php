@@ -12,26 +12,28 @@ use Illuminate\Support\Facades\Validator;
 
 class MovieController extends Controller
 {
+    private $category;
+
+    public function __construct(Category $category)
+    {
+        $this->category = $category;
+    }
+
     public function index()
     {
-        $movies = Movie::latest()
-            ->when(request('search'), fn($query) => $query->where('judul', 'like', '%' . request('search') . '%')
-                ->orWhere('sinopsis', 'like', '%' . request('search') . '%'))
-            ->paginate(6)
-            ->withQueryString();
-
+        $movies = $this->getMoviesWithSearch(request('search'));
         return view('homepage', compact('movies'));
     }
 
     public function detail($id)
     {
-        $movie = Movie::findOrFail($id);
+        $movie = $this->findMovieById($id);
         return view('detail', compact('movie'));
     }
 
     public function create()
     {
-        $categories = Category::all();
+        $categories = $this->category->all();
         return view('input', compact('categories'));
     }
 
@@ -39,13 +41,13 @@ class MovieController extends Controller
     {
         $validator = $this->validateMovie($request, true);
         if ($validator->fails()) {
-            return redirect()->back()->withErrors($validator)->withInput();
+            return $this->returnValidationErrors($validator);
         }
 
         $fileName = $this->handleCoverUpload($request);
-        Movie::create($this->movieData($request, $fileName));
+        $this->createMovie($request, $fileName);
 
-        return redirect('/')->with('success', 'Data berhasil disimpan');
+        return $this->redirectWithSuccess('/');
     }
 
     public function data()
@@ -56,8 +58,8 @@ class MovieController extends Controller
 
     public function form_edit($id)
     {
-        $movie = Movie::findOrFail($id);
-        $categories = Category::all();
+        $movie = $this->findMovieById($id);
+        $categories = $this->category->all();
         return view('form-edit', compact('movie', 'categories'));
     }
 
@@ -65,28 +67,22 @@ class MovieController extends Controller
     {
         $validator = $this->validateMovie($request);
         if ($validator->fails()) {
-            return redirect()->back()->withErrors($validator)->withInput();
+            return $this->returnValidationErrors($validator);
         }
 
-        $movie = Movie::findOrFail($id);
-        if ($request->hasFile('foto_sampul')) {
-            $this->deleteCover($movie->foto_sampul);
-            $fileName = $this->handleCoverUpload($request);
-            $movie->update($this->movieData($request, $fileName));
-        } else {
-            $movie->update($this->movieData($request));
-        }
+        $movie = $this->findMovieById($id);
+        $this->handleMovieUpdate($request, $movie);
 
-        return redirect('/movies/data')->with('success', 'Data berhasil diperbarui');
+        return $this->redirectWithSuccess('/movies/data');
     }
 
     public function delete($id)
     {
-        $movie = Movie::findOrFail($id);
+        $movie = $this->findMovieById($id);
         $this->deleteCover($movie->foto_sampul);
         $movie->delete();
 
-        return redirect('/movies/data')->with('success', 'Data berhasil dihapus');
+        return $this->redirectWithSuccess('/movies/data');
     }
 
     // Helper functions
@@ -110,13 +106,18 @@ class MovieController extends Controller
         return Validator::make($request->all(), $rules);
     }
 
+    private function getMoviesWithSearch($search)
+    {
+        return Movie::latest()
+            ->when($search, fn($query) => $query->where('judul', 'like', '%' . $search . '%')
+                ->orWhere('sinopsis', 'like', '%' . $search . '%'))
+            ->paginate(6)
+            ->withQueryString();
+    }
+
     private function handleCoverUpload(Request $request)
     {
-        $randomName = Str::uuid()->toString();
-        $extension = $request->file('foto_sampul')->getClientOriginalExtension();
-        $fileName = $randomName . '.' . $extension;
-        $request->file('foto_sampul')->move(public_path('images'), $fileName);
-        return $fileName;
+        return $this->generateUniqueFileName($request->file('foto_sampul'));
     }
 
     private function deleteCover($filename)
@@ -134,5 +135,43 @@ class MovieController extends Controller
             $data['foto_sampul'] = $fileName;
         }
         return $data;
+    }
+
+    private function returnValidationErrors($validator)
+    {
+        return redirect()->back()->withErrors($validator)->withInput();
+    }
+
+    private function redirectWithSuccess($route)
+    {
+        return redirect($route)->with('success', 'Data berhasil disimpan');
+    }
+
+    private function handleMovieUpdate(Request $request, Movie $movie)
+    {
+        if ($request->hasFile('foto_sampul')) {
+            $this->deleteCover($movie->foto_sampul);
+            $fileName = $this->handleCoverUpload($request);
+            $movie->update($this->movieData($request, $fileName));
+        } else {
+            $movie->update($this->movieData($request));
+        }
+    }
+
+    private function createMovie(Request $request, $fileName)
+    {
+        Movie::create($this->movieData($request, $fileName));
+    }
+
+    private function generateUniqueFileName($file)
+    {
+        $fileName = Str::uuid()->toString() . '.' . $file->getClientOriginalExtension();
+        $file->move(public_path('images'), $fileName);
+        return $fileName;
+    }
+
+    private function findMovieById($id)
+    {
+        return Movie::findOrFail($id);
     }
 }
