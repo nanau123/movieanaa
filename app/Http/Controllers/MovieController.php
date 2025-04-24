@@ -21,7 +21,7 @@ class MovieController extends Controller
             })
             ->paginate(6)
             ->withQueryString();
-
+        //
         return view('homepage', compact('movies'));
     }
 
