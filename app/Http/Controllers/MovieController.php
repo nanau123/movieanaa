@@ -12,22 +12,22 @@ use Illuminate\Support\Facades\Validator;
 
 class MovieController extends Controller
 {
-
     public function index()
     {
+        $movies = Movie::latest()
+            ->when(request('search'), function ($query) {
+                $query->where('judul', 'like', '%' . request('search') . '%')
+                    ->orWhere('sinopsis', 'like', '%' . request('search') . '%');
+            })
+            ->paginate(6)
+            ->withQueryString();
 
-        $query = Movie::latest();
-        if (request('search')) {
-            $query->where('judul', 'like', '%' . request('search') . '%')
-                ->orWhere('sinopsis', 'like', '%' . request('search') . '%');
-        }
-        $movies = $query->paginate(6)->withQueryString();
         return view('homepage', compact('movies'));
     }
 
     public function detail($id)
     {
-        $movie = Movie::find($id);
+        $movie = Movie::findOrFail($id);
         return view('detail', compact('movie'));
     }
 
@@ -39,40 +39,15 @@ class MovieController extends Controller
 
     public function store(Request $request)
     {
-        // Validasi data
-        $validator = Validator::make($request->all(), [
-            'id' => ['required', 'string', 'max:255', Rule::unique('movies', 'id')],
-            'judul' => 'required|string|max:255',
-            'category_id' => 'required|integer',
-            'sinopsis' => 'required|string',
-            'tahun' => 'required|integer',
-            'pemain' => 'required|string',
-            'foto_sampul' => 'required|image|mimes:jpeg,png,jpg,gif,svg|max:2048',
-        ]);
-        // Jika validasi gagal, kembali ke halaman input dengan pesan kesalahan
+        $validator = $this->validateMovie($request, true);
+
         if ($validator->fails()) {
-            return redirect('movies/create')
-                ->withErrors($validator)
-                ->withInput();
+            return redirect()->back()->withErrors($validator)->withInput();
         }
 
-        $randomName = Str::uuid()->toString();
-        // $fileExtension = $request->file('foto_sampul')->getClientOriginalExtension();
-        $fileExtension = 'jpg';
-        $fileName = $randomName . '.' . $fileExtension;
+        $fileName = $this->uploadCover($request);
 
-        // Simpan file foto ke folder public/images
-        $request->file('foto_sampul')->move(public_path('images'), $fileName);
-        // Simpan data ke table movies
-        Movie::create([
-            'id' => $request->id,
-            'judul' => $request->judul,
-            'category_id' => $request->category_id,
-            'sinopsis' => $request->sinopsis,
-            'tahun' => $request->tahun,
-            'pemain' => $request->pemain,
-            'foto_sampul' => $fileName,
-        ]);
+        Movie::create($this->movieData($request, $fileName));
 
         return redirect('/')->with('success', 'Data berhasil disimpan');
     }
@@ -85,65 +60,27 @@ class MovieController extends Controller
 
     public function form_edit($id)
     {
-        $movie = Movie::find($id);
+        $movie = Movie::findOrFail($id);
         $categories = Category::all();
         return view('form-edit', compact('movie', 'categories'));
     }
 
     public function update(Request $request, $id)
     {
-        // Validasi data
-        $validator = Validator::make($request->all(), [
-            'judul' => 'required|string|max:255',
-            'category_id' => 'required|integer',
-            'sinopsis' => 'required|string',
-            'tahun' => 'required|integer',
-            'pemain' => 'required|string',
-            'foto_sampul' => 'image|mimes:jpeg,png,jpg,gif,svg|max:2048',
-        ]);
+        $validator = $this->validateMovie($request);
 
-        // Jika validasi gagal, kembali ke halaman edit dengan pesan kesalahan
         if ($validator->fails()) {
-            return redirect("/movies/edit/{$id}")
-                ->withErrors($validator)
-                ->withInput();
+            return redirect()->back()->withErrors($validator)->withInput();
         }
 
-        // Ambil data movie yang akan diupdate
         $movie = Movie::findOrFail($id);
 
-        // Jika ada file yang diunggah, simpan file baru
         if ($request->hasFile('foto_sampul')) {
-            $randomName = Str::uuid()->toString();
-            $fileExtension = $request->file('foto_sampul')->getClientOriginalExtension();
-            $fileName = $randomName . '.' . $fileExtension;
-
-            // Simpan file foto ke folder public/images
-            $request->file('foto_sampul')->move(public_path('images'), $fileName);
-
-            // Hapus foto lama jika ada
-            if (File::exists(public_path('images/' . $movie->foto_sampul))) {
-                File::delete(public_path('images/' . $movie->foto_sampul));
-            }
-
-            // Update record di database dengan foto yang baru
-            $movie->update([
-                'judul' => $request->judul,
-                'sinopsis' => $request->sinopsis,
-                'category_id' => $request->category_id,
-                'tahun' => $request->tahun,
-                'pemain' => $request->pemain,
-                'foto_sampul' => $fileName,
-            ]);
+            $this->deleteCover($movie->foto_sampul);
+            $fileName = $this->uploadCover($request);
+            $movie->update($this->movieData($request, $fileName));
         } else {
-            // Jika tidak ada file yang diunggah, update data tanpa mengubah foto
-            $movie->update([
-                'judul' => $request->judul,
-                'sinopsis' => $request->sinopsis,
-                'category_id' => $request->category_id,
-                'tahun' => $request->tahun,
-                'pemain' => $request->pemain,
-            ]);
+            $movie->update($this->movieData($request));
         }
 
         return redirect('/movies/data')->with('success', 'Data berhasil diperbarui');
@@ -152,15 +89,60 @@ class MovieController extends Controller
     public function delete($id)
     {
         $movie = Movie::findOrFail($id);
-
-        // Delete the movie's photo if it exists
-        if (File::exists(public_path('images/' . $movie->foto_sampul))) {
-            File::delete(public_path('images/' . $movie->foto_sampul));
-        }
-
-        // Delete the movie record from the database
+        $this->deleteCover($movie->foto_sampul);
         $movie->delete();
 
         return redirect('/movies/data')->with('success', 'Data berhasil dihapus');
+    }
+
+    // ========== PRIVATE HELPERS ==========
+
+    private function validateMovie(Request $request, $isCreate = false)
+    {
+        $rules = [
+            'judul' => 'required|string|max:255',
+            'category_id' => 'required|integer',
+            'sinopsis' => 'required|string',
+            'tahun' => 'required|integer',
+            'pemain' => 'required|string',
+            'foto_sampul' => 'image|mimes:jpeg,png,jpg,gif,svg|max:2048',
+        ];
+
+        if ($isCreate) {
+            $rules['id'] = ['required', 'string', 'max:255', Rule::unique('movies', 'id')];
+            $rules['foto_sampul'] = 'required|' . $rules['foto_sampul'];
+        }
+
+        return Validator::make($request->all(), $rules);
+    }
+
+    private function uploadCover(Request $request)
+    {
+        $randomName = Str::uuid()->toString();
+        $extension = $request->file('foto_sampul')->getClientOriginalExtension();
+        $fileName = $randomName . '.' . $extension;
+
+        $request->file('foto_sampul')->move(public_path('images'), $fileName);
+
+        return $fileName;
+    }
+
+    private function deleteCover($filename)
+    {
+        $path = public_path('images/' . $filename);
+        if (File::exists($path)) {
+            File::delete($path);
+        }
+    }
+
+    private function movieData(Request $request, $fileName = null)
+    {
+        $data = $request->only(['id', 'judul', 'category_id', 'sinopsis', 'tahun', 'pemain']);
+
+        if ($fileName) {
+            $data['foto_sampul'] = $fileName;
+        }
+
+        return $data;
     }
 }
